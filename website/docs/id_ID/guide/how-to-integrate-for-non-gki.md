@@ -17,23 +17,13 @@ KernelSU menggunakan kprobe untuk melakukan hook kernel, jika *kprobe* berjalan 
 
 Pertama, tambahkan KernelSU ke dalam berkas kernel source tree:
 
-- Latest tag(stable)
-
 ```sh
-curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
+curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
 ```
 
-- main branch(dev)
-
-```sh
-curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
-```
-
-- Select tag(Such as v0.5.2)
-
-```sh
-curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.5.2
-```
+:::info
+[KernelSU 1.0 dan versi yang lebih baru tidak lagi mendukung kernel non-GKI](https://github.com/tiann/KernelSU/issues/1705). Versi terakhir yang didukung adalah `v0.9.5`, pastikan untuk menggunakan versi yang benar.
+:::
 
 Kemudian, Anda harus memeriksa apakah *kprobe* diaktifkan dalam konfigurasi kernel Anda, jika tidak, tambahkan konfigurasi ini ke dalamnya:
 
@@ -56,7 +46,7 @@ Jika kprobe tidak dapat bekerja pada kernel Anda (mungkin karena bug di upstream
 Pertama, tambahkan KernelSU ke dalam direktori kernel source tree:
 
 ```sh
-curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
+curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
 ```
 
 Kemudian, tambahkan panggilan KernelSU ke source kernel, berikut ini adalah patch yang dapat dirujuk:
@@ -86,7 +76,8 @@ index ac59664eaecf..bdd585e1d2cc 100644
 +		ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);
  	return __do_execve_file(fd, filename, argv, envp, flags, NULL);
  }
- 
+```
+```diff
 diff --git a/fs/open.c b/fs/open.c
 index 05036d819197..965b84d486b8 100644
 --- a/fs/open.c
@@ -104,10 +95,20 @@ index 05036d819197..965b84d486b8 100644
   */
  long do_faccessat(int dfd, const char __user *filename, int mode)
  {
-+	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
  	const struct cred *old_cred;
  	struct cred *override_cred;
  	struct path path;
+ 	struct inode *inode;
+ 	struct vfsmount *mnt;
+ 	int res;
+ 	unsigned int lookup_flags = LOOKUP_FOLLOW;
+ 
++	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
+ 
+ 	if (mode & ~S_IRWXO)	/* where's F_OK, X_OK, W_OK, R_OK? */
+ 		return -EINVAL;
+```
+```diff
 diff --git a/fs/read_write.c b/fs/read_write.c
 index 650fc7e0f3a6..55be193913b6 100644
 --- a/fs/read_write.c
@@ -129,6 +130,8 @@ index 650fc7e0f3a6..55be193913b6 100644
  	if (!(file->f_mode & FMODE_READ))
  		return -EBADF;
  	if (!(file->f_mode & FMODE_CAN_READ))
+```
+```diff
 diff --git a/fs/stat.c b/fs/stat.c
 index 376543199b5a..82adcef03ecc 100644
 --- a/fs/stat.c

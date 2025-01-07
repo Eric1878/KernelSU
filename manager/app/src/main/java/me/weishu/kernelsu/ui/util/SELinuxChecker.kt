@@ -1,7 +1,7 @@
 package me.weishu.kernelsu.ui.util
 
-import androidx.compose.ui.res.stringResource
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.res.stringResource
 import com.topjohnwu.superuser.Shell
 import me.weishu.kernelsu.R
 
@@ -12,7 +12,9 @@ fun getSELinuxStatus(): String {
         .build("sh")
 
     val list = ArrayList<String>()
-    val result = shell.newJob().add("getenforce").to(list, list).exec()
+    val result = shell.use {
+        it.newJob().add("getenforce").to(list, list).exec()
+    }
     val output = result.out.joinToString("\n").trim()
 
     if (result.isSuccess) {

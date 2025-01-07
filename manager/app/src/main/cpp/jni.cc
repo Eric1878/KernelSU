@@ -46,6 +46,12 @@ Java_me_weishu_kernelsu_Natives_isSafeMode(JNIEnv *env, jclass clazz) {
     return is_safe_mode();
 }
 
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_me_weishu_kernelsu_Natives_isLkmMode(JNIEnv *env, jclass clazz) {
+    return is_lkm_mode();
+}
+
 static void fillIntArray(JNIEnv *env, jobject list, int *data, int count) {
     auto cls = env->GetObjectClass(list);
     auto add = env->GetMethodID(cls, "add", "(Ljava/lang/Object;)Z");
@@ -155,13 +161,6 @@ Java_me_weishu_kernelsu_Natives_getAppProfile(JNIEnv *env, jobject, jstring pkg,
         // non root use default = true
         env->SetBooleanField(obj, allowSuField, false);
         env->SetBooleanField(obj, nonRootUseDefaultField, true);
-
-        jobject capList = env->GetObjectField(obj, capabilitiesField);
-        int DEFAULT_CAPS[] = {CAP_DAC_READ_SEARCH};
-
-        for (auto i: DEFAULT_CAPS) {
-            addIntToList(env, capList, i);
-        }
 
         return obj;
     }

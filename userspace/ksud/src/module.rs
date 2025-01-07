@@ -1,9 +1,9 @@
 #[allow(clippy::wildcard_imports)]
 use crate::utils::*;
 use crate::{
-    assets, defs, mount,
+    assets, defs, ksucalls, mount,
     restorecon::{restore_syscon, setsyscon},
-    sepolicy,
+    sepolicy, utils,
 };
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -11,6 +11,8 @@ use const_format::concatcp;
 use is_executable::is_executable;
 use java_properties::PropertiesIter;
 use log::{info, warn};
+
+use std::fs::OpenOptions;
 use std::{
     collections::HashMap,
     env::var as env_var,
@@ -23,7 +25,7 @@ use std::{
 use zip_extensions::zip_extract_file_to_memory;
 
 #[cfg(unix)]
-use std::os::unix::{prelude::PermissionsExt, process::CommandExt};
+use std::os::unix::{fs::MetadataExt, prelude::PermissionsExt, process::CommandExt};
 
 const INSTALLER_CONTENT: &str = include_str!("./installer.sh");
 const INSTALL_MODULE_SCRIPT: &str = concatcp!(
@@ -51,7 +53,7 @@ fn exec_install_script(module_file: &str) -> Result<()> {
             ),
         )
         .env("KSU", "true")
-        .env("KSU_KERNEL_VER_CODE", crate::ksu::get_version().to_string())
+        .env("KSU_KERNEL_VER_CODE", ksucalls::get_version().to_string())
         .env("KSU_VER", defs::VERSION_NAME)
         .env("KSU_VER_CODE", defs::VERSION_CODE)
         .env("OUTFD", "1")
@@ -118,25 +120,6 @@ fn foreach_active_module(f: impl FnMut(&Path) -> Result<()>) -> Result<()> {
     foreach_module(true, f)
 }
 
-fn get_minimal_image_size(img: &str) -> Result<u64> {
-    check_image(img)?;
-
-    let output = Command::new("resize2fs")
-        .args(["-P", img])
-        .stdout(Stdio::piped())
-        .output()?;
-
-    let output = String::from_utf8_lossy(&output.stdout);
-    println!("- {}", output.trim());
-    let regex = regex::Regex::new(r"filesystem: (\d+)")?;
-    let result = regex
-        .captures(&output)
-        .ok_or(anyhow::anyhow!("regex not match"))?;
-    let result = &result[1];
-    let result = u64::from_str(result)?;
-    Ok(result)
-}
-
 fn check_image(img: &str) -> Result<()> {
     let result = Command::new("e2fsck")
         .args(["-yf", img])
@@ -154,31 +137,6 @@ fn check_image(img: &str) -> Result<()> {
     //     code.unwrap_or(-1)
     // );
     info!("e2fsck exit code: {}", code.unwrap_or(-1));
-    Ok(())
-}
-
-fn grow_image_size(img: &str, extra_size: u64) -> Result<()> {
-    let minimal_size = get_minimal_image_size(img)?; // the minimal size is in KB
-    let target_size = minimal_size * 1024 + extra_size;
-
-    // check image
-    check_image(img)?;
-
-    println!(
-        "- Target image size: {}",
-        humansize::format_size(target_size, humansize::DECIMAL)
-    );
-    let target_size = target_size / 1024 + 1024;
-    info!("resize image to {target_size}K, minimal size is {minimal_size}K");
-    let result = Command::new("resize2fs")
-        .args([img, &format!("{target_size}K")])
-        .stdout(Stdio::piped())
-        .status()
-        .with_context(|| format!("Failed to exec resize2fs {img}"))?;
-    ensure!(result.success(), "Failed to resize2fs: {}", result);
-
-    check_image(img)?;
-
     Ok(())
 }
 
@@ -220,7 +178,7 @@ fn exec_script<T: AsRef<Path>>(path: T, wait: bool) -> Result<()> {
         .arg(path.as_ref())
         .env("ASH_STANDALONE", "1")
         .env("KSU", "true")
-        .env("KSU_KERNEL_VER_CODE", crate::ksu::get_version().to_string())
+        .env("KSU_KERNEL_VER_CODE", ksucalls::get_version().to_string())
         .env("KSU_VER_CODE", defs::VERSION_CODE)
         .env("KSU_VER", defs::VERSION_NAME)
         .env(
@@ -324,13 +282,34 @@ pub fn prune_modules() -> Result<()> {
     Ok(())
 }
 
+fn create_module_image(image: &str, image_size: u64, journal_size: u64) -> Result<()> {
+    File::create(image)
+        .context("Failed to create ext4 image file")?
+        .set_len(image_size)
+        .context("Failed to truncate ext4 image")?;
+
+    // format the img to ext4 filesystem
+    let result = Command::new("mkfs.ext4")
+        .arg("-J")
+        .arg(format!("size={journal_size}"))
+        .arg(image)
+        .stdout(Stdio::piped())
+        .output()?;
+    ensure!(
+        result.status.success(),
+        "Failed to format ext4 image: {}",
+        String::from_utf8(result.stderr).unwrap()
+    );
+    check_image(image)?;
+    Ok(())
+}
 fn _install_module(zip: &str) -> Result<()> {
     ensure_boot_completed()?;
 
     // print banner
     println!(include_str!("banner"));
 
-    assets::ensure_binaries().with_context(|| "Failed to extract assets")?;
+    assets::ensure_binaries(false).with_context(|| "Failed to extract assets")?;
 
     // first check if workding dir is usable
     ensure_dir_exists(defs::WORKING_DIR).with_context(|| "Failed to create working dir")?;
@@ -344,7 +323,7 @@ fn _install_module(zip: &str) -> Result<()> {
     zip_extract_file_to_memory(&zip_path, &entry_path, &mut buffer)?;
 
     let mut module_prop = HashMap::new();
-    PropertiesIter::new_with_encoding(Cursor::new(buffer), encoding::all::UTF_8).read_into(
+    PropertiesIter::new_with_encoding(Cursor::new(buffer), encoding_rs::UTF_8).read_into(
         |k, v| {
             module_prop.insert(k, v);
         },
@@ -354,6 +333,7 @@ fn _install_module(zip: &str) -> Result<()> {
     let Some(module_id) = module_prop.get("id") else {
         bail!("module id not found in module.prop!");
     };
+    let module_id = module_id.trim();
 
     let modules_img = Path::new(defs::MODULE_IMG);
     let modules_update_img = Path::new(defs::MODULE_UPDATE_IMG);
@@ -369,17 +349,11 @@ fn _install_module(zip: &str) -> Result<()> {
         std::fs::remove_file(tmp_module_path)?;
     }
 
-    let default_reserve_size = 256 * 1024 * 1024;
     let zip_uncompressed_size = get_zip_uncompressed_size(zip)?;
-    let grow_size = default_reserve_size + zip_uncompressed_size;
 
     info!(
         "zip uncompressed size: {}",
         humansize::format_size(zip_uncompressed_size, humansize::DECIMAL)
-    );
-    info!(
-        "grow size: {}",
-        humansize::format_size(grow_size, humansize::DECIMAL)
     );
 
     println!("- Preparing image");
@@ -388,53 +362,61 @@ fn _install_module(zip: &str) -> Result<()> {
         humansize::format_size(zip_uncompressed_size, humansize::DECIMAL)
     );
 
+    let sparse_image_size = 1 << 40; // 1T
+    let journal_size = 8; // 8M
     if !modules_img_exist && !modules_update_img_exist {
         // if no modules and modules_update, it is brand new installation, we should create a new img
         // create a tmp module img and mount it to modules_update
         info!("Creating brand new module image");
-        File::create(tmp_module_img)
-            .context("Failed to create ext4 image file")?
-            .set_len(grow_size)
-            .context("Failed to extend ext4 image")?;
-
-        // format the img to ext4 filesystem
-        let result = Command::new("mkfs.ext4")
-            .arg("-b")
-            .arg("1024")
-            .arg(tmp_module_img)
-            .stdout(Stdio::piped())
-            .output()?;
-        ensure!(
-            result.status.success(),
-            "Failed to format ext4 image: {}",
-            String::from_utf8(result.stderr).unwrap()
-        );
-
-        check_image(tmp_module_img)?;
+        create_module_image(tmp_module_img, sparse_image_size, journal_size)?;
     } else if modules_update_img_exist {
         // modules_update.img exists, we should use it as tmp img
         info!("Using existing modules_update.img as tmp image");
-        std::fs::copy(modules_update_img, tmp_module_img).with_context(|| {
+        utils::copy_sparse_file(modules_update_img, tmp_module_img, true).with_context(|| {
             format!(
                 "Failed to copy {} to {}",
                 modules_update_img.display(),
                 tmp_module_img
             )
         })?;
-        // grow size of the tmp image
-        grow_image_size(tmp_module_img, grow_size)?;
     } else {
         // modules.img exists, we should use it as tmp img
         info!("Using existing modules.img as tmp image");
-        std::fs::copy(modules_img, tmp_module_img).with_context(|| {
-            format!(
-                "Failed to copy {} to {}",
-                modules_img.display(),
-                tmp_module_img
-            )
-        })?;
-        // grow size of the tmp image
-        grow_image_size(tmp_module_img, grow_size)?;
+
+        #[cfg(unix)]
+        let blksize = std::fs::metadata(defs::MODULE_DIR)?.blksize();
+        #[cfg(not(unix))]
+        let blksize = 0;
+        // legacy image, it's block size is 1024 with unlimited journal size
+        if blksize == 1024 {
+            println!("- Legacy image, migrating to new format, please be patient...");
+            create_module_image(tmp_module_img, sparse_image_size, journal_size)?;
+            let _dontdrop =
+                mount::AutoMountExt4::try_new(tmp_module_img, module_update_tmp_dir, true)
+                    .with_context(|| format!("Failed to mount {tmp_module_img}"))?;
+            utils::copy_module_files(defs::MODULE_DIR, module_update_tmp_dir)
+                .with_context(|| "Failed to migrate module files".to_string())?;
+        } else {
+            utils::copy_sparse_file(modules_img, tmp_module_img, true)
+                .with_context(|| "Failed to copy module image".to_string())?;
+
+            if std::fs::metadata(tmp_module_img)?.len() < sparse_image_size {
+                // truncate the file to new size
+                OpenOptions::new()
+                    .write(true)
+                    .open(tmp_module_img)
+                    .context("Failed to open ext4 image")?
+                    .set_len(sparse_image_size)
+                    .context("Failed to truncate ext4 image")?;
+
+                // resize the image to new size
+                check_image(tmp_module_img)?;
+                Command::new("resize2fs")
+                    .arg(tmp_module_img)
+                    .stdout(Stdio::piped())
+                    .status()?;
+            }
+        }
     }
 
     // ensure modules_update exists
@@ -472,7 +454,7 @@ fn _install_module(zip: &str) -> Result<()> {
     // all done, rename the tmp image to modules_update.img
     if std::fs::rename(tmp_module_img, defs::MODULE_UPDATE_IMG).is_err() {
         warn!("Rename image failed, try copy it.");
-        std::fs::copy(tmp_module_img, defs::MODULE_UPDATE_IMG)
+        utils::copy_sparse_file(tmp_module_img, defs::MODULE_UPDATE_IMG, true)
             .with_context(|| "Failed to copy image.".to_string())?;
         let _ = std::fs::remove_file(tmp_module_img);
     }
@@ -512,14 +494,14 @@ where
             modules_update_img.display(),
             modules_update_tmp_img.display()
         );
-        std::fs::copy(modules_update_img, modules_update_tmp_img)?;
+        utils::copy_sparse_file(modules_update_img, modules_update_tmp_img, true)?;
     } else {
         info!(
             "copy {} to {}",
             modules_img.display(),
             modules_update_tmp_img.display()
         );
-        std::fs::copy(modules_img, modules_update_tmp_img)?;
+        utils::copy_sparse_file(modules_img, modules_update_tmp_img, true)?;
     }
 
     // ensure modules_update dir exist
@@ -533,7 +515,7 @@ where
 
     if let Err(e) = std::fs::rename(modules_update_tmp_img, defs::MODULE_UPDATE_IMG) {
         warn!("Rename image failed: {e}, try copy it.");
-        std::fs::copy(modules_update_tmp_img, defs::MODULE_UPDATE_IMG)
+        utils::copy_sparse_file(modules_update_tmp_img, defs::MODULE_UPDATE_IMG, true)
             .with_context(|| "Failed to copy image.".to_string())?;
         let _ = std::fs::remove_file(modules_update_tmp_img);
     }
@@ -558,12 +540,13 @@ pub fn uninstall_module(id: &str) -> Result<()> {
             }
             let content = std::fs::read(module_prop)?;
             let mut module_id: String = String::new();
-            PropertiesIter::new_with_encoding(Cursor::new(content), encoding::all::UTF_8)
-                .read_into(|k, v| {
+            PropertiesIter::new_with_encoding(Cursor::new(content), encoding_rs::UTF_8).read_into(
+                |k, v| {
                     if k.eq("id") {
                         module_id = v;
                     }
-                })?;
+                },
+            )?;
             if module_id.eq(mid) {
                 let remove_file = path.join(defs::REMOVE_FILE_NAME);
                 File::create(remove_file).with_context(|| "Failed to create remove file.")?;
@@ -585,6 +568,11 @@ pub fn uninstall_module(id: &str) -> Result<()> {
 
         Ok(())
     })
+}
+
+pub fn run_action(id: &str) -> Result<()> {
+    let action_script_path = format!("/data/adb/modules/{}/action.sh", id);
+    exec_script(&action_script_path, true)
 }
 
 fn _enable_module(module_dir: &str, mid: &str, enable: bool) -> Result<()> {
@@ -621,13 +609,21 @@ pub fn disable_module(id: &str) -> Result<()> {
 }
 
 pub fn disable_all_modules() -> Result<()> {
+    mark_all_modules(defs::DISABLE_FILE_NAME)
+}
+
+pub fn uninstall_all_modules() -> Result<()> {
+    mark_all_modules(defs::REMOVE_FILE_NAME)
+}
+
+fn mark_all_modules(flag_file: &str) -> Result<()> {
     // we assume the module dir is already mounted
     let dir = std::fs::read_dir(defs::MODULE_DIR)?;
     for entry in dir.flatten() {
         let path = entry.path();
-        let disable_flag = path.join(defs::DISABLE_FILE_NAME);
-        if let Err(e) = ensure_file_exists(disable_flag) {
-            warn!("Failed to disable module: {}: {}", path.display(), e);
+        let flag = path.join(flag_file);
+        if let Err(e) = ensure_file_exists(flag) {
+            warn!("Failed to mark module: {}: {}", path.display(), e);
         }
     }
 
@@ -656,13 +652,13 @@ fn _list_modules(path: &str) -> Vec<HashMap<String, String>> {
             continue;
         };
         let mut module_prop_map: HashMap<String, String> = HashMap::new();
-        let encoding = encoding::all::UTF_8;
+        let encoding = encoding_rs::UTF_8;
         let result =
             PropertiesIter::new_with_encoding(Cursor::new(content), encoding).read_into(|k, v| {
                 module_prop_map.insert(k, v);
             });
 
-        if module_prop_map["id"].is_empty() {
+        if !module_prop_map.contains_key("id") || module_prop_map["id"].is_empty() {
             if let Some(id) = entry.file_name().to_str() {
                 info!("Use dir name as module id: {}", id);
                 module_prop_map.insert("id".to_owned(), id.to_owned());
@@ -676,10 +672,14 @@ fn _list_modules(path: &str) -> Vec<HashMap<String, String>> {
         let enabled = !path.join(defs::DISABLE_FILE_NAME).exists();
         let update = path.join(defs::UPDATE_FILE_NAME).exists();
         let remove = path.join(defs::REMOVE_FILE_NAME).exists();
+        let web = path.join(defs::MODULE_WEB_DIR).exists();
+        let action = path.join(defs::MODULE_ACTION_SH).exists();
 
         module_prop_map.insert("enabled".to_owned(), enabled.to_string());
         module_prop_map.insert("update".to_owned(), update.to_string());
         module_prop_map.insert("remove".to_owned(), remove.to_string());
+        module_prop_map.insert("web".to_owned(), web.to_string());
+        module_prop_map.insert("action".to_owned(), action.to_string());
 
         if result.is_err() {
             warn!("Failed to parse module.prop: {}", module_prop.display());
@@ -694,5 +694,23 @@ fn _list_modules(path: &str) -> Vec<HashMap<String, String>> {
 pub fn list_modules() -> Result<()> {
     let modules = _list_modules(defs::MODULE_DIR);
     println!("{}", serde_json::to_string_pretty(&modules)?);
+    Ok(())
+}
+
+pub fn shrink_image(img: &str) -> Result<()> {
+    check_image(img)?;
+    Command::new("resize2fs")
+        .arg("-M")
+        .arg(img)
+        .stdout(Stdio::piped())
+        .status()?;
+    Ok(())
+}
+
+pub fn shrink_ksu_images() -> Result<()> {
+    shrink_image(defs::MODULE_IMG)?;
+    if Path::new(defs::MODULE_UPDATE_IMG).exists() {
+        shrink_image(defs::MODULE_UPDATE_IMG)?;
+    }
     Ok(())
 }
