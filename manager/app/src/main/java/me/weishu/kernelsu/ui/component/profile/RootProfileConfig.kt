@@ -1,11 +1,10 @@
-@file:OptIn(ExperimentalMaterial3Api::class)
-
 package me.weishu.kernelsu.ui.component.profile
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardActions
@@ -20,16 +19,17 @@ import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
@@ -53,6 +53,7 @@ import me.weishu.kernelsu.Natives
 import me.weishu.kernelsu.R
 import me.weishu.kernelsu.profile.Capabilities
 import me.weishu.kernelsu.profile.Groups
+import me.weishu.kernelsu.ui.component.rememberCustomDialog
 import me.weishu.kernelsu.ui.util.isSepolicyValid
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -74,9 +75,9 @@ fun RootProfileConfig(
 
         var expanded by remember { mutableStateOf(false) }
         val currentNamespace = when (profile.namespace) {
-            Natives.Profile.Namespace.Inherited.ordinal -> stringResource(R.string.profile_namespace_inherited)
-            Natives.Profile.Namespace.Global.ordinal -> stringResource(R.string.profile_namespace_global)
-            Natives.Profile.Namespace.Individual.ordinal -> stringResource(R.string.profile_namespace_individual)
+            Natives.Profile.Namespace.INHERITED.ordinal -> stringResource(R.string.profile_namespace_inherited)
+            Natives.Profile.Namespace.GLOBAL.ordinal -> stringResource(R.string.profile_namespace_global)
+            Natives.Profile.Namespace.INDIVIDUAL.ordinal -> stringResource(R.string.profile_namespace_individual)
             else -> stringResource(R.string.profile_namespace_inherited)
         }
         ListItem(headlineContent = {
@@ -86,7 +87,7 @@ fun RootProfileConfig(
             ) {
                 OutlinedTextField(
                     modifier = Modifier
-                        .menuAnchor()
+                        .menuAnchor(MenuAnchorType.PrimaryNotEditable)
                         .fillMaxWidth(),
                     readOnly = true,
                     label = { Text(stringResource(R.string.profile_namespace)) },
@@ -104,21 +105,21 @@ fun RootProfileConfig(
                     DropdownMenuItem(
                         text = { Text(stringResource(R.string.profile_namespace_inherited)) },
                         onClick = {
-                            onProfileChange(profile.copy(namespace = Natives.Profile.Namespace.Inherited.ordinal))
+                            onProfileChange(profile.copy(namespace = Natives.Profile.Namespace.INHERITED.ordinal))
                             expanded = false
                         },
                     )
                     DropdownMenuItem(
                         text = { Text(stringResource(R.string.profile_namespace_global)) },
                         onClick = {
-                            onProfileChange(profile.copy(namespace = Natives.Profile.Namespace.Global.ordinal))
+                            onProfileChange(profile.copy(namespace = Natives.Profile.Namespace.GLOBAL.ordinal))
                             expanded = false
                         },
                     )
                     DropdownMenuItem(
                         text = { Text(stringResource(R.string.profile_namespace_individual)) },
                         onClick = {
-                            onProfileChange(profile.copy(namespace = Natives.Profile.Namespace.Individual.ordinal))
+                            onProfileChange(profile.copy(namespace = Natives.Profile.Namespace.INDIVIDUAL.ordinal))
                             expanded = false
                         },
                     )
@@ -146,7 +147,7 @@ fun RootProfileConfig(
 
         val selectedGroups = profile.groups.ifEmpty { listOf(0) }.let { e ->
             e.mapNotNull { g ->
-                Groups.values().find { it.gid == g }
+                Groups.entries.find { it.gid == g }
             }
         }
         GroupsPanel(selectedGroups) {
@@ -159,7 +160,7 @@ fun RootProfileConfig(
         }
 
         val selectedCaps = profile.capabilities.mapNotNull { e ->
-            Capabilities.values().find { it.cap == e }
+            Capabilities.entries.find { it.cap == e }
         }
 
         CapsPanel(selectedCaps) {
@@ -184,14 +185,23 @@ fun RootProfileConfig(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun GroupsPanel(selected: List<Groups>, closeSelection: (selection: Set<Groups>) -> Unit) {
+    val selectGroupsDialog = rememberCustomDialog { dismiss: () -> Unit ->
+        val groups = Groups.entries.toTypedArray().sortedWith(
+            compareBy<Groups> { if (selected.contains(it)) 0 else 1 }
+                .then(compareBy {
+                    when (it) {
+                        Groups.ROOT -> 0
+                        Groups.SYSTEM -> 1
+                        Groups.SHELL -> 2
+                        else -> Int.MAX_VALUE
+                    }
+                })
+                .then(compareBy { it.name })
 
-    var showDialog by remember { mutableStateOf(false) }
-
-    if (showDialog) {
-        val groups = Groups.values()
+        )
         val options = groups.map { value ->
             ListOption(
                 titleText = value.display,
@@ -205,7 +215,7 @@ fun GroupsPanel(selected: List<Groups>, closeSelection: (selection: Set<Groups>)
             state = rememberUseCaseState(visible = true, onFinishedRequest = {
                 closeSelection(selection)
             }, onCloseRequest = {
-                showDialog = false
+                dismiss()
             }),
             header = Header.Default(
                 title = stringResource(R.string.profile_groups),
@@ -225,14 +235,20 @@ fun GroupsPanel(selected: List<Groups>, closeSelection: (selection: Set<Groups>)
         )
     }
 
-    OutlinedCard(modifier = Modifier
-        .fillMaxWidth()
-        .padding(16.dp)
-        .clickable {
-            showDialog = true
-        }) {
+    OutlinedCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp)
+    ) {
 
-        Column(modifier = Modifier.padding(16.dp)) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable {
+                    selectGroupsDialog.show()
+                }
+                .padding(16.dp)
+        ) {
             Text(stringResource(R.string.profile_groups))
             FlowRow {
                 selected.forEach { group ->
@@ -247,17 +263,17 @@ fun GroupsPanel(selected: List<Groups>, closeSelection: (selection: Set<Groups>)
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun CapsPanel(
     selected: Collection<Capabilities>,
     closeSelection: (selection: Set<Capabilities>) -> Unit
 ) {
-
-    var showDialog by remember { mutableStateOf(false) }
-
-    if (showDialog) {
-        val caps = Capabilities.values()
+    val selectCapabilitiesDialog = rememberCustomDialog { dismiss ->
+        val caps = Capabilities.entries.toTypedArray().sortedWith(
+            compareBy<Capabilities> { if (selected.contains(it)) 0 else 1 }
+                .then(compareBy { it.name })
+        )
         val options = caps.map { value ->
             ListOption(
                 titleText = value.display,
@@ -271,7 +287,7 @@ fun CapsPanel(
             state = rememberUseCaseState(visible = true, onFinishedRequest = {
                 closeSelection(selection)
             }, onCloseRequest = {
-                showDialog = false
+                dismiss()
             }),
             header = Header.Default(
                 title = stringResource(R.string.profile_capabilities),
@@ -290,14 +306,20 @@ fun CapsPanel(
         )
     }
 
-    OutlinedCard(modifier = Modifier
-        .fillMaxWidth()
-        .padding(16.dp)
-        .clickable {
-            showDialog = true
-        }) {
+    OutlinedCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp)
+    ) {
 
-        Column(modifier = Modifier.padding(16.dp)) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable {
+                    selectCapabilitiesDialog.show()
+                }
+                .padding(16.dp)
+        ) {
             Text(stringResource(R.string.profile_capabilities))
             FlowRow {
                 selected.forEach { group ->
@@ -312,7 +334,6 @@ fun CapsPanel(
     }
 }
 
-@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun UidPanel(uid: Int, label: String, onUidChange: (Int) -> Unit) {
 
@@ -321,10 +342,10 @@ private fun UidPanel(uid: Int, label: String, onUidChange: (Int) -> Unit) {
             mutableStateOf(false)
         }
         var lastValidUid by remember {
-            mutableStateOf(uid)
+            mutableIntStateOf(uid)
         }
-
         val keyboardController = LocalSoftwareKeyboardController.current
+
         OutlinedTextField(
             modifier = Modifier.fillMaxWidth(),
             label = { Text(label) },
@@ -357,13 +378,13 @@ private fun UidPanel(uid: Int, label: String, onUidChange: (Int) -> Unit) {
     })
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SELinuxPanel(
     profile: Natives.Profile,
     onSELinuxChange: (domain: String, rules: String) -> Unit
 ) {
-    var showDialog by remember { mutableStateOf(false) }
-    if (showDialog) {
+    val editSELinuxDialog = rememberCustomDialog { dismiss ->
         var domain by remember { mutableStateOf(profile.context) }
         var rules by remember { mutableStateOf(profile.rules) }
 
@@ -415,7 +436,7 @@ private fun SELinuxPanel(
                     onSELinuxChange(domain, rules)
                 },
                 onCloseRequest = {
-                    showDialog = false
+                    dismiss()
                 }),
             header = Header.Default(
                 title = stringResource(R.string.profile_selinux_context),
@@ -434,10 +455,10 @@ private fun SELinuxPanel(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable {
-                    showDialog = true
+                    editSELinuxDialog.show()
                 },
             enabled = false,
-            colors = TextFieldDefaults.outlinedTextFieldColors(
+            colors = OutlinedTextFieldDefaults.colors(
                 disabledTextColor = MaterialTheme.colorScheme.onSurface,
                 disabledBorderColor = MaterialTheme.colorScheme.outline,
                 disabledPlaceholderColor = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -445,7 +466,7 @@ private fun SELinuxPanel(
             ),
             label = { Text(text = stringResource(R.string.profile_selinux_context)) },
             value = profile.context,
-            onValueChange = { },
+            onValueChange = { }
         )
     })
 }

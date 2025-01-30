@@ -1,16 +1,16 @@
 # Rescue from bootloop
 
-When flashing a device, we may encounter situations where the device becomes "bricked". In theory, if you only use fastboot to flash the boot partition or install unsuitable modules that cause the device to fail to boot, then this can be restored by appropriate operations. This document aims to provide some emergency methods to help you recover from a "bricked" device.
+When flashing a device, we may encounter situations when the device becomes "bricked". In theory, if you only use fastboot to flash the boot partition or install incompatible modules that cause the device to fail to boot, then this can be restored by appropriate operations. This document aims to provide some emergency methods to help you recover from a "bricked" state.
 
 ## Brick by flashing boot partition
 
 In KernelSU, the following situations may cause boot brick when flashing the boot partition:
 
-1. You flashed a boot image in the wrong format. For example, if your phone's boot format is `gz`, but you flashed an `lz4` format image, then the phone will not be able to boot.
-2. Your phone needs to disable AVB verification in order to boot properly (usually requiring wiping all data on the phone).
-3. Your kernel has some bugs or is not suitable for your phone to flash.
+1. You flashed a boot image in the wrong format. For example, if your device's boot format is `gz`, but you flashed an `lz4` format image, then the device will not be able to boot.
+2. Your device needs to disable AVB verification in order to boot properly (usually requiring wiping all data on the device).
+3. Your kernel has some bugs or is not suitable for your device to flash.
 
-No matter what the situation is, you can recover by **flashing the stock boot image**. Therefore, at the beginning of the installation tutorial, we strongly recommend that you back up your stock boot before flashing. If you haven't backed up, you can obtain the original factory boot from other users with the same device as you or from the official firmware.
+No matter what the situation is, you can recover by **flashing the stock boot image**. Therefore, at the beginning of the installation tutorial, we strongly recommend that you back up your stock boot before flashing. If you have not backed up, you can obtain the original factory boot from other users with the same device as you or from the official firmware.
 
 ## Brick by modules
 
@@ -44,7 +44,7 @@ The built-in safe mode is implemented in the kernel, so there is no possibility 
 
 ### Malicious modules
 
-If the above methods cannot rescue your device, it is highly likely that the module you installed has malicious operations or has damaged your device through other means. In this case, there are only two suggestions:
+If the above methods cannot rescue your device, it is very likely that the module you installed has malicious operations or has damaged your device through other means. In this case, there are only two suggestions:
 
 1. Wipe the data and flash the official system.
 2. Consult the after-sales service.

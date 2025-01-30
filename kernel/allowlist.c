@@ -1,21 +1,21 @@
-#include "ksu.h"
-#include "linux/compiler.h"
-#include "linux/fs.h"
-#include "linux/gfp.h"
-#include "linux/kernel.h"
-#include "linux/list.h"
-#include "linux/printk.h"
-#include "linux/slab.h"
-#include "linux/types.h"
-#include "linux/version.h"
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 14, 0)
-#include "linux/compiler_types.h"
-#endif
+#include <linux/capability.h>
+#include <linux/compiler.h>
+#include <linux/fs.h>
+#include <linux/gfp.h>
+#include <linux/kernel.h>
+#include <linux/list.h>
+#include <linux/printk.h>
+#include <linux/slab.h>
+#include <linux/types.h>
+#include <linux/version.h>
+#include <linux/compiler_types.h>
 
+#include "ksu.h"
 #include "klog.h" // IWYU pragma: keep
 #include "selinux/selinux.h"
 #include "kernel_compat.h"
 #include "allowlist.h"
+#include "manager.h"
 
 #define FILE_MAGIC 0x7f4b5355 // ' KSU', u32
 #define FILE_FORMAT_VERSION 3 // u32
@@ -63,12 +63,14 @@ static void remove_uid_from_arr(uid_t uid)
 
 static void init_default_profiles()
 {
+	kernel_cap_t full_cap = CAP_FULL_SET;
+
 	default_root_profile.uid = 0;
 	default_root_profile.gid = 0;
 	default_root_profile.groups_count = 1;
 	default_root_profile.groups[0] = 0;
-	memset(&default_root_profile.capabilities, 0xff,
-	       sizeof(default_root_profile.capabilities));
+	memcpy(&default_root_profile.capabilities.effective, &full_cap,
+		sizeof(default_root_profile.capabilities.effective));
 	default_root_profile.namespaces = 0;
 	strcpy(default_root_profile.selinux_domain, KSU_DEFAULT_SELINUX_DOMAIN);
 
@@ -274,6 +276,11 @@ bool __ksu_is_allow_uid(uid_t uid)
 		return false;
 	}
 
+	if (likely(ksu_is_manager_uid_valid()) && unlikely(ksu_get_manager_uid() == uid)) {
+		// manager is always allowed!
+		return true;
+	}
+
 	if (likely(uid <= BITMAP_UID_MAX)) {
 		return !!(allow_list_bitmap[uid / BITS_PER_BYTE] & (1 << (uid % BITS_PER_BYTE)));
 	} else {
@@ -289,6 +296,10 @@ bool __ksu_is_allow_uid(uid_t uid)
 bool ksu_uid_should_umount(uid_t uid)
 {
 	struct app_profile profile = { .current_uid = uid };
+	if (likely(ksu_is_manager_uid_valid()) && unlikely(ksu_get_manager_uid() == uid)) {
+		// we should not umount on manager!
+		return false;
+	}
 	bool found = ksu_get_app_profile(&profile);
 	if (!found) {
 		// no app profile found, it must be non root app
@@ -351,7 +362,7 @@ void do_save_allow_list(struct work_struct *work)
 	loff_t off = 0;
 
 	struct file *fp =
-		ksu_filp_open_compat(KERNEL_SU_ALLOWLIST, O_WRONLY | O_CREAT, 0644);
+		ksu_filp_open_compat(KERNEL_SU_ALLOWLIST, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (IS_ERR(fp)) {
 		pr_err("save_allow_list create file failed: %ld\n", PTR_ERR(fp));
 		return;
@@ -458,7 +469,9 @@ void ksu_prune_allowlist(bool (*is_uid_valid)(uid_t, char *, void *), void *data
 			modified = true;
 			pr_info("prune uid: %d, package: %s\n", uid, package);
 			list_del(&np->list);
-			allow_list_bitmap[uid / BITS_PER_BYTE] &= ~(1 << (uid % BITS_PER_BYTE));
+			if (likely(uid <= BITMAP_UID_MAX)) {
+				allow_list_bitmap[uid / BITS_PER_BYTE] &= ~(1 << (uid % BITS_PER_BYTE));
+			}
 			remove_uid_from_arr(uid);
 			smp_mb();
 			kfree(np);

@@ -18,6 +18,14 @@ object Natives {
     // 11071: Fix the issue of failing to set a custom SELinux type.
     const val MINIMAL_SUPPORTED_KERNEL = 11071
 
+    // 11640: Support query working mode, LKM or GKI
+    // when MINIMAL_SUPPORTED_KERNEL > 11640, we can remove this constant.
+    const val MINIMAL_SUPPORTED_KERNEL_LKM = 11648
+    const val KERNEL_SU_DOMAIN = "u:r:su:s0"
+
+    const val ROOT_UID = 0
+    const val ROOT_GID = 0
+
     init {
         System.loadLibrary("kernelsu")
     }
@@ -34,6 +42,9 @@ object Natives {
     val isSafeMode: Boolean
         external get
 
+    val isLkmMode: Boolean
+        external get
+
     external fun uidShouldUmount(uid: Int): Boolean
 
     /**
@@ -45,7 +56,6 @@ object Natives {
     external fun setAppProfile(profile: Profile?): Boolean
 
     private const val NON_ROOT_DEFAULT_PROFILE_KEY = "$"
-    private const val ROOT_DEFAULT_PROFILE_KEY = "#"
     private const val NOBODY_UID = 9999
 
     fun setDefaultUmountModules(umountModules: Boolean): Boolean {
@@ -85,21 +95,21 @@ object Natives {
         // these are used for root profile
         val rootUseDefault: Boolean = true,
         val rootTemplate: String? = null,
-        val uid: Int = 0,
-        val gid: Int = 0,
+        val uid: Int = ROOT_UID,
+        val gid: Int = ROOT_GID,
         val groups: List<Int> = mutableListOf(),
         val capabilities: List<Int> = mutableListOf(),
-        val context: String = "u:r:su:s0",
-        val namespace: Int = Namespace.Inherited.ordinal,
+        val context: String = KERNEL_SU_DOMAIN,
+        val namespace: Int = Namespace.INHERITED.ordinal,
 
         val nonRootUseDefault: Boolean = true,
         val umountModules: Boolean = true,
         var rules: String = "", // this field is save in ksud!!
     ) : Parcelable {
         enum class Namespace {
-            Inherited,
-            Global,
-            Individual,
+            INHERITED,
+            GLOBAL,
+            INDIVIDUAL,
         }
 
         constructor() : this("")
